@@ -357,7 +357,6 @@ class ReloadPhase(Enum):
     FAILED = "failed"
     ROLLED_BACK = "rolled_back"
 
-
 @dataclass
 class GPUProcess:
     """Represents a process using the GPU"""
@@ -3214,10 +3213,9 @@ class NVIDIADriverReloader:
         # causing system crash. The manual filtering above already handled
         # safe termination. If processes remain, they're likely critical.
 
-
-    def unload_and_reload_driver(self) -> bool:
+    def unload_driver(self) -> bool:
         """
-        Phase 4-6: Unload modules, reload modules
+        Phase 4: Unload modules
 
         NOTE: Users should update drivers BEFORE running this script via:
         - apt-get update && apt-get upgrade (Ubuntu/Debian)
@@ -3238,6 +3236,22 @@ class NVIDIADriverReloader:
         if not success:
             self.state.add_error("Failed to unload all NVIDIA kernel modules")
             return False
+
+        logger.info(f"Driver unloaded successfully!")
+        
+        return True
+
+    def reload_driver(self) -> bool:
+        """
+        Phase 5-6: Unload modules, reload modules
+
+        NOTE: Users should update drivers BEFORE running this script via:
+        - apt-get update && apt-get upgrade (Ubuntu/Debian)
+        - yum update (RHEL/CentOS)
+        - Or run NVIDIA .run file manually
+
+        This script only reloads the already-installed driver.
+        """
 
         # Phase 5: Reload kernel modules (loads from /usr/lib/modules automatically)
         self.state.set_phase(ReloadPhase.LOADING_MODULES)
@@ -3372,6 +3386,198 @@ class NVIDIADriverReloader:
         logger.info("Rollback completed")
         return True
 
+
+    def perform_unload_only(
+        self,
+        skip_confirmation: bool = False,
+        dry_run: bool = False
+    ) -> bool:
+        """
+        Perform driver unload only.
+
+        NOTE: Update drivers FIRST via package manager (apt-get/yum) or
+        manually run NVIDIA .run file, then use this script to reload.
+        """
+        if not check_root():
+            return False
+
+        print("\n" + "=" * 70)
+        print("NVIDIA Driver Unload")
+        print("=" * 70)
+
+        # Show current status
+        status = self.print_status()
+
+        # Pre-flight checks
+        can_proceed, issues = self._pre_flight_check()
+
+        if issues:
+            print("\nPre-flight check results:")
+            for issue in issues:
+                prefix = "❌" if issue.startswith("BLOCKER") else "⚠️ "
+                print(f"  {prefix} {issue}")
+
+        if not can_proceed:
+            print("\n❌ Cannot proceed due to blockers above.")
+            print("   Stop the display server or switch to a headless configuration.")
+            return False
+
+        # Initialize state
+        self.state = ReloadState(
+            started_at=datetime.now().isoformat(),
+            driver_version_before=status['driver']['version'] or "",
+            docker_was_running=status['docker_running']
+        )
+        self.state.save()
+
+        if dry_run:
+            print("\n[DRY RUN] Would perform the following actions:")
+            print("  1. Stop GPU containers:", [c['name'] for c in status['containers']['gpu_containers']])
+            print("  2. Stop services:", self.config['services_to_stop'])
+            print("  3. Kill GPU processes:", [p['pid'] for p in status['processes']])
+            print("  4. Unload modules:", status['modules']['loaded'])
+            return True
+
+        # Confirmation
+        if not skip_confirmation:
+            print("\n⚠️  This will temporarily stop all GPU workloads.")
+            response = input("Proceed with driver reload? [y/N]: ")
+            if response.lower() != 'y':
+                print("Aborted by user")
+                return False
+
+        try:
+            # Execute reload sequence
+            print("\n[Phase 1-3/4] Stopping GPU workloads...")
+            if not self.stop_all_gpu_workloads():
+                logger.error("Failed to stop GPU workloads")
+                self.rollback()
+                return False
+
+            print("\n[Phase 4/4] Unloading driver...")
+            if not self.unload_driver():
+                logger.error("Failed to unload driver")
+                self.rollback()
+                return False
+
+            print("\n" + "=" * 70)
+            print("✅ Driver unload completed successfully!")
+            print("=" * 70)
+
+            # Show new status
+            self.print_status()
+
+            return True
+
+        except KeyboardInterrupt:
+            print("\n\n⚠️  Interrupted! Attempting recovery...")
+            self.state.add_error("User interrupted with Ctrl+C")
+            self.rollback()
+            return False
+
+        except Exception as e:
+            logger.error(f"Unexpected error: {e}")
+            logger.debug(traceback.format_exc())
+            self.state.add_error(str(e))
+            self.rollback()
+            return False
+
+
+    def perform_load_only(
+        self,
+        skip_confirmation: bool = False,
+        dry_run: bool = False
+    ) -> bool:
+        """
+        Perform complete driver load sequence.
+
+        NOTE: Update drivers FIRST via package manager (apt-get/yum) or
+        manually run NVIDIA .run file, then use this script to reload.
+        """
+        if not check_root():
+            return False
+
+        print("\n" + "=" * 70)
+        print("NVIDIA Driver load")
+        print("=" * 70)
+
+        # Show current status
+        status = self.print_status()
+
+        # Pre-flight checks
+        can_proceed, issues = self._pre_flight_check()
+
+        if issues:
+            print("\nPre-flight check results:")
+            for issue in issues:
+                prefix = "❌" if issue.startswith("BLOCKER") else "⚠️ "
+                print(f"  {prefix} {issue}")
+
+        if not can_proceed:
+            print("\n❌ Cannot proceed due to blockers above.")
+            print("   Stop the display server or switch to a headless configuration.")
+            return False
+
+        # Initialize state
+        self.state = ReloadState(
+            started_at=datetime.now().isoformat(),
+            driver_version_before=status['driver']['version'] or "",
+            docker_was_running=status['docker_running']
+        )
+        self.state.save()
+
+        if dry_run:
+            print("\n[DRY RUN] Would perform the following actions:")
+            print("  1. Load modules (from /usr/lib/modules)")
+            print("  2. Restart Docker")
+            print("  3. Restart containers")
+            return True
+
+        # Confirmation
+        if not skip_confirmation:
+            print("\n⚠️  This will temporarily stop all GPU workloads.")
+            response = input("Proceed with driver reload? [y/N]: ")
+            if response.lower() != 'y':
+                print("Aborted by user")
+                return False
+
+        try:
+            # Execute reload sequence
+            print("\n[Phase 1/3] Reloading driver...")
+            if not self.reload_driver():
+                logger.error("Failed to reload driver")
+                self.rollback()
+                return False
+
+            print("\n[Phase 2-3/3] Restarting workloads...")
+            if not self.restart_workloads():
+                logger.warning("Some workloads may not have restarted")
+
+            # Mark complete
+            self.state.set_phase(ReloadPhase.COMPLETED)
+
+            print("\n" + "=" * 70)
+            print("✅ Driver load completed successfully!")
+            print("=" * 70)
+
+            # Show new status
+            self.print_status()
+
+            return True
+
+        except KeyboardInterrupt:
+            print("\n\n⚠️  Interrupted! Attempting recovery...")
+            self.state.add_error("User interrupted with Ctrl+C")
+            self.rollback()
+            return False
+
+        except Exception as e:
+            logger.error(f"Unexpected error: {e}")
+            logger.debug(traceback.format_exc())
+            self.state.add_error(str(e))
+            self.rollback()
+            return False
+
     def perform_full_reload(
         self,
         skip_confirmation: bool = False,
@@ -3444,8 +3650,14 @@ class NVIDIADriverReloader:
                 self.rollback()
                 return False
 
-            print("\n[Phase 4-5/9] Reloading driver...")
-            if not self.unload_and_reload_driver():
+            print("\n[Phase 4/9] Unloading driver...")
+            if not self.unload_driver():
+                logger.error("Failed to unload driver")
+                self.rollback()
+                return False
+
+            print("\n[Phase 5-6/9] Reloading driver...")
+            if not self.reload_driver():
                 logger.error("Failed to reload driver")
                 self.rollback()
                 return False
@@ -3566,6 +3778,10 @@ REFERENCES:
                         help='Comprehensive nvidia-smi verification (detailed health check)')
     actions.add_argument('--reload', '-r', action='store_true',
                         help='Perform full driver reload')
+    actions.add_argument('--unload', '-u', action='store_true',
+                        help='Perform driver unload only')
+    actions.add_argument('--load', '-l', action='store_true',
+                        help='Perform driver load only')
     actions.add_argument('--reset', action='store_true',
                         help='Perform GPU reset only (nvidia-smi --gpu-reset)')
     actions.add_argument('--stop', action='store_true',
@@ -3641,7 +3857,7 @@ REFERENCES:
         print("=" * 70)
         return 0 if health_ok else 1
 
-    if args.status or not any([args.reload, args.reset, args.stop, args.start, args.rollback, args.verify]):
+    if args.status or not any([args.reload, args.unload, args.load, args.reset, args.stop, args.start, args.rollback, args.verify]):
         if args.json:
             status = reloader.get_comprehensive_status()
             print(json.dumps(status, indent=2, default=str))
@@ -3674,6 +3890,20 @@ REFERENCES:
 
             if args.reset:
                 success = reloader.perform_gpu_reset()
+                return 0 if success else 1
+
+            if args.unload:
+                success = reloader.perform_unload_only(
+                    skip_confirmation=args.yes,
+                    dry_run=args.dry_run
+                )
+                return 0 if success else 1
+
+            if args.load:
+                success = reloader.perform_load_only(
+                    skip_confirmation=args.yes,
+                    dry_run=args.dry_run
+                )
                 return 0 if success else 1
 
             if args.reload:
