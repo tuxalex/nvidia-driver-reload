@@ -86,6 +86,12 @@ sudo python3 nvidia_driver_reload.py --reload
 # Skip confirmation prompt (for automation)
 sudo python3 nvidia_driver_reload.py --reload --yes
 
+# Only load driver from unload status (do not unload before load)
+sudo python3 nvidia_driver_reload.py --load
+
+# Only unload driver from load status
+sudo python3 nvidia_driver_reload.py --unload
+
 # GPU reset only (faster, doesn't unload modules)
 sudo python3 nvidia_driver_reload.py --reset
 
@@ -106,6 +112,8 @@ sudo python3 nvidia_driver_reload.py --rollback
 | `--status`, `-s` | Show current NVIDIA status |
 | `--verify` | Comprehensive nvidia-smi health check |
 | `--reload`, `-r` | Full driver reload |
+| `--load`, `-l` | Only driver load |
+| `--unload`, `-l` | Only driver unload |
 | `--reset` | GPU reset only (nvidia-smi --gpu-reset) |
 | `--stop` | Stop all GPU workloads |
 | `--start` | Restart stopped workloads |
